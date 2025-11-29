@@ -41,7 +41,7 @@ func init() {
 	flag.StringVar(&serverAddr, "f", "", "服务端地址 (格式: x.x.workers.dev:443)")
 	flag.StringVar(&serverIP, "ip", "", "指定服务端IP（绕过DNS解析）")
 	flag.StringVar(&token, "token", "", "身份验证令牌")
-	flag.StringVar(&dnsServer, "dns", "223.5.5.5/dns-query", "DNS服务器 (IP:端口格式使用UDP，否则使用DoH)")
+	flag.StringVar(&dnsServer, "dns", "dns.alidns.com/dns-query", "DNS服务器 (IP:端口格式使用UDP，否则使用DoH)")
 	flag.StringVar(&echDomain, "ech", "cloudflare-ech.com", "ECH查询域名")
 }
 
@@ -177,36 +177,42 @@ func queryHTTPSRecordDoH(domain, dohURL string) (string, error) {
 	
 	// 如果是IP地址，需要特殊处理证书验证
 	if isIP {
+		// 解析目标IP
+		targetIP := net.ParseIP(host)
+		
 		tlsConfig.InsecureSkipVerify = false
 		tlsConfig.VerifyConnection = func(cs tls.ConnectionState) error {
-			// 验证证书链
-			opts := x509.VerifyOptions{
-				DNSName:       "",  // 不验证DNS名称
-				Intermediates: x509.NewCertPool(),
-			}
-			
-			// 添加中间证书
-			for _, cert := range cs.PeerCertificates[1:] {
-				opts.Intermediates.AddCert(cert)
-			}
+			cert := cs.PeerCertificates[0]
 			
 			// 检查证书的IP SAN是否包含目标IP
-			cert := cs.PeerCertificates[0]
 			ipMatched := false
-			for _, ip := range cert.IPAddresses {
-				if ip.String() == host {
+			for _, certIP := range cert.IPAddresses {
+				if certIP.Equal(targetIP) {
 					ipMatched = true
 					break
 				}
 			}
 			
 			if !ipMatched {
-				return fmt.Errorf("证书不包含目标IP: %s", host)
+				return fmt.Errorf("证书不包含目标IP: %s (证书包含: %v)", host, cert.IPAddresses)
+			}
+			
+			// 验证证书链（不指定DNSName）
+			opts := x509.VerifyOptions{
+				Intermediates: x509.NewCertPool(),
+			}
+			
+			// 添加中间证书
+			for _, intermediateCert := range cs.PeerCertificates[1:] {
+				opts.Intermediates.AddCert(intermediateCert)
 			}
 			
 			// 验证证书链
-			_, err := cert.Verify(opts)
-			return err
+			if _, err := cert.Verify(opts); err != nil {
+				return fmt.Errorf("证书链验证失败: %w", err)
+			}
+			
+			return nil
 		}
 	}
 	
